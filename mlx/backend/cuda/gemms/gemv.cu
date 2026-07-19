@@ -12,6 +12,13 @@ namespace mlx::core::cu {
 namespace cg = cooperative_groups;
 
 static constexpr int rows_per_block = 8;
+static constexpr uint32_t max_grid_yz_dim = 65535;
+
+static dim3 get_gemv_grid(uint32_t num_blocks_x, uint32_t batch_count) {
+  uint32_t num_blocks_z = cuda::ceil_div(batch_count, max_grid_yz_dim);
+  uint32_t num_blocks_y = cuda::ceil_div(batch_count, num_blocks_z);
+  return {num_blocks_x, num_blocks_y, num_blocks_z};
+}
 
 // Accumulator type selection per input element type T.
 template <typename T>
@@ -91,9 +98,14 @@ __global__ void gemv_batched(
     const __grid_constant__ Shape batch_shape,
     const __grid_constant__ Strides mat_batch_strides,
     const __grid_constant__ Strides vec_batch_strides,
-    int batch_ndim) {
-  auto block = cg::this_thread_block();
-  auto batch_idx = block.group_index().y;
+    int batch_ndim,
+    uint32_t batch_count) {
+  auto grid = cg::this_grid();
+  uint32_t batch_idx =
+      grid.block_index().z * grid.dim_blocks().y + grid.block_index().y;
+  if (batch_idx >= batch_count) {
+    return;
+  }
   auto [vec_offset, mat_offset] = elem_to_loc(
       batch_idx,
       batch_shape.data(),
@@ -122,9 +134,14 @@ __global__ void gemv_gather(
     const __grid_constant__ Shape index_shape,
     const __grid_constant__ Strides mat_index_strides,
     const __grid_constant__ Strides vec_index_strides,
-    int index_batch_ndim) {
-  auto block = cg::this_thread_block();
-  auto indices_idx = block.group_index().y;
+    int index_batch_ndim,
+    uint32_t batch_count) {
+  auto grid = cg::this_grid();
+  uint32_t indices_idx =
+      grid.block_index().z * grid.dim_blocks().y + grid.block_index().y;
+  if (indices_idx >= batch_count) {
+    return;
+  }
   uint32_t index_mat, index_vec;
   if (index_batch_ndim > 1) {
     auto [mat_idx_offset, vec_idx_offset] = elem_to_loc(
@@ -245,7 +262,7 @@ void gemv(
         auto kernel = gemv_batched<DataType, rows_per_block, n_per_thread()>;
         encoder.add_kernel_node(
             kernel,
-            dim3{num_blocks_x, batch_count},
+            get_gemv_grid(num_blocks_x, batch_count),
             block_dims,
             mat,
             vec,
@@ -255,7 +272,8 @@ void gemv(
             const_param(batch_shape),
             mat_strides,
             vec_strides,
-            batch_shape.size());
+            batch_shape.size(),
+            batch_count);
       }
     });
   });
@@ -298,7 +316,7 @@ void gather_mv(
       auto kernel = gemv_gather<DataType, rows_per_block, n_per_thread()>;
       encoder.add_kernel_node(
           kernel,
-          dim3{num_blocks_x, batch_size},
+          get_gemv_grid(num_blocks_x, batch_size),
           block_dims,
           mat,
           vec,
@@ -316,7 +334,8 @@ void gather_mv(
           const_param(mat_indices.shape()),
           const_param(mat_indices.strides()),
           const_param(vec_indices.strides()),
-          mat_indices.ndim());
+          mat_indices.ndim(),
+          batch_size);
     });
   });
 }

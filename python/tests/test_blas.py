@@ -376,6 +376,24 @@ class TestBlas(mlx_tests.MLXTestCase):
                         shape_mat, shape_vec, mat_first=False, np_dtype=np_dtype
                     )
 
+    @unittest.skipIf(not mx.cuda.is_available(), "CUDA is not available")
+    def test_matrix_vector_large_batch(self):
+        batch_size = 65536
+        with mx.stream(mx.gpu):
+            mat = mx.ones((batch_size, 8, 4))
+            vec = mx.ones((batch_size, 4, 1))
+
+            out = mat @ vec
+
+            self.assertEqual(out.shape, (batch_size, 8, 1))
+            self.assertTrue(mx.all(out == 4).item())
+
+            indices = mx.zeros((batch_size,), dtype=mx.uint32)
+            out = mx.gather_mm(mat[:1], vec[:1], indices, indices)
+
+            self.assertEqual(out.shape, (batch_size, 8, 1))
+            self.assertTrue(mx.all(out == 4).item())
+
     def test_matrix_vector_broadcast(self):
         for dtype in self.dtypes:
             with self.subTest(dtype=dtype):
